@@ -46,7 +46,7 @@
 </select>
 <label for="elo">Bot ELO: <strong id="elo-value">1500</strong></label>
 <input id="elo" type="range" min="0" max="3000" step="1" value="1500" style="display:block;width:100%;margin:9px 0">
-<div class="hint">Approximate strength target. Ratings below 1320 use Stockfish's weaker skill levels; exact ELO cannot be guaranteed.</div>
+<div class="hint">At exactly 0, the bot makes a random legal move. Other ratings use Stockfish's strength controls; exact ELO cannot be guaranteed.</div>
 </div>
 <div id="status" class="status" style="margin-top:10px">White to move.</div>
 <div class="buttons"><button id="undo">Undo move</button><button id="restart">New game</button><button id="flip">Flip board</button></div>
@@ -177,8 +177,30 @@ function configureBotStrength(){
 }
 function botMove(){
  if(mode!=="1p"||finished()||game.turn()===humanColor||botThinking||running)return;
- if(!engineReady){$("status").textContent="Waiting for Stockfish to finish loading…";return;}
  botThinking=true;selected=null;targets=[];render();
+
+ // At exactly 0 ELO, deliberately ignore Stockfish and choose a random
+ // legal move. This creates genuinely unreliable play rather than merely
+ // using Stockfish's weakest built-in skill setting.
+ if(botElo===0){
+  $("status").textContent="0 ELO bot is choosing a completely random move…";
+  const legal=game.moves({verbose:true});
+  if(!legal.length){botThinking=false;render();return;}
+  const chosen=legal[Math.floor(Math.random()*legal.length)];
+  window.setTimeout(()=>{
+   if(mode!=="1p"||finished()||game.turn()===humanColor){botThinking=false;render();return;}
+   const played=game.move({from:chosen.from,to:chosen.to,promotion:chosen.promotion||"q"});
+   botThinking=false;
+   if(played){
+    last={from:played.from,to:played.to};selected=null;targets=[];
+    $("analysis").textContent=finished()?"Game finished. You can now analyze it.":"Finish the game to enable analysis.";
+   }
+   render();
+  },350);
+  return;
+ }
+
+ if(!engineReady){botThinking=false;$("status").textContent="Waiting for Stockfish to finish loading…";render();return;}
  $("status").textContent="Stockfish is thinking…";
  configureBotStrength();
  search={kind:"bot",score:0};
