@@ -25,7 +25,7 @@
 </head>
 <body>
 <div class="app">
-<header><h1>Chess with Stockfish</h1><div class="sub">Two-player chess · legal moves · post-game engine analysis</div></header>
+<header><h1>Chess with Stockfish</h1><div class="sub" id="subtitle">Two-player chess · legal moves · post-game engine analysis</div></header>
 <div class="layout">
 <main>
 <div class="player"><span>Black</span><span></span></div>
@@ -33,7 +33,24 @@
 <div class="player bottom"><span>White</span><span></span></div>
 </main>
 <aside class="side">
-<section class="panel"><h2>Game</h2><div id="status" class="status">White to move.</div><div class="buttons"><button id="undo">Undo move</button><button id="restart">New game</button><button id="flip">Flip board</button></div></section>
+<section class="panel">
+<h2>Game</h2>
+<label for="mode">Game mode</label>
+<select id="mode" style="display:block;width:100%;margin:5px 0 12px;padding:9px;border-radius:7px;background:#343e4f;color:white;border:1px solid #566176">
+<option value="2p">2 Players</option><option value="1p">1 Player (Stockfish)</option>
+</select>
+<div id="bot-settings" style="display:none">
+<label for="human-color">Play as</label>
+<select id="human-color" style="display:block;width:100%;margin:5px 0 12px;padding:9px;border-radius:7px;background:#343e4f;color:white;border:1px solid #566176">
+<option value="w">White</option><option value="b">Black</option>
+</select>
+<label for="elo">Bot ELO: <strong id="elo-value">1500</strong></label>
+<input id="elo" type="range" min="0" max="3000" step="1" value="1500" style="display:block;width:100%;margin:9px 0">
+<div class="hint">Approximate strength target. Ratings below 1320 use Stockfish's weaker skill levels; exact ELO cannot be guaranteed.</div>
+</div>
+<div id="status" class="status" style="margin-top:10px">White to move.</div>
+<div class="buttons"><button id="undo">Undo move</button><button id="restart">New game</button><button id="flip">Flip board</button></div>
+</section>
 <section class="panel"><h2>Move history</h2><div id="moves" class="moves">No moves yet.</div></section>
 <section class="panel"><h2>Stockfish analysis</h2><div id="engine-status" class="status">Loading Stockfish…</div><div class="buttons"><button id="analyze" class="primary" disabled>Analyze finished game</button><button id="stop" disabled>Stop</button></div><div id="analysis" class="analysis" style="margin-top:12px">Finish the game to enable analysis.</div><div class="hint">Analysis runs in your browser. Keep this page open while it works.</div></section>
 </aside>
@@ -47,6 +64,7 @@ const game=new Chess(),$=id=>document.getElementById(id);
 const symbols={wp:"♙",wn:"♘",wb:"♗",wr:"♖",wq:"♕",wk:"♔",bp:"♟",bn:"♞",bb:"♝",br:"♜",bq:"♛",bk:"♚"};
 const files="abcdefgh";let flipped=false,selected=null,targets=[],last=null,promotion=null;
 let worker=null,engineReady=false,search=null,running=false,stopFlag=false,token=0;
+let mode="2p",humanColor="w",botThinking=false,botElo=1500;
 function finished(){return game.game_over();}
 function sqAt(row,col){return (flipped?files[7-col]:files[col])+(flipped?row+1:8-row);}
 function status(){
@@ -68,9 +86,12 @@ function render(){
   if(r===7){const x=document.createElement("span");x.className="coord";x.style.left="auto";x.style.right="4px";x.textContent=sq[0];el.appendChild(x);}
   el.addEventListener("click",()=>clickSquare(sq));board.appendChild(el);
  }
- $("status").textContent=status();renderMoves();
- $("undo").disabled=!game.history().length||running;
- $("analyze").disabled=!finished()||!engineReady||running;
+ $("status").textContent=botThinking?"Stockfish is thinking…":status();renderMoves();
+ $("undo").disabled=!game.history().length||running||botThinking;
+ $("analyze").disabled=!finished()||!engineReady||running||botThinking;
+ $("mode").disabled=running||botThinking;
+ $("human-color").disabled=running||botThinking;
+ $("elo").disabled=running||botThinking;
 }
 function renderMoves(){
  const hist=game.history(),el=$("moves");el.innerHTML="";
@@ -81,7 +102,7 @@ function renderMoves(){
  }
 }
 function clickSquare(sq){
- if(finished()||running||promotion)return;
+ if(finished()||running||botThinking||promotion||(mode==="1p"&&game.turn()!==humanColor))return;
  const p=game.get(sq);
  if(selected&&targets.includes(sq)){doMove(selected,sq);return;}
  if(p&&p.color===game.turn()){selected=sq;targets=game.moves({square:sq,verbose:true}).map(m=>m.to);}
@@ -91,14 +112,92 @@ function doMove(from,to,prom){
  const p=game.get(from),isProm=p&&p.type==="p"&&((p.color==="w"&&to[1]==="8")||(p.color==="b"&&to[1]==="1"));
  if(isProm&&!prom){promotion={from,to};$("promotion").style.display="flex";return;}
  const m=game.move({from,to,promotion:prom||"q"});
- if(m){last={from:m.from,to:m.to};selected=null;targets=[];$("analysis").textContent=finished()?"Game finished. You can now analyze it.":"Finish the game to enable analysis.";render();}
+ if(m){
+  last={from:m.from,to:m.to};selected=null;targets=[];
+  $("analysis").textContent=finished()?"Game finished. You can now analyze it.":"Finish the game to enable analysis.";
+  render();
+  if(mode==="1p"&&!finished()&&game.turn()!==humanColor)botMove();
+ }
 }
 $("promotion").querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>{
  if(!promotion)return;const p=promotion;promotion=null;$("promotion").style.display="none";doMove(p.from,p.to,b.dataset.p);
 }));
-$("undo").onclick=()=>{if(running)return;game.undo();const h=game.history({verbose:true});last=h.length?{from:h[h.length-1].from,to:h[h.length-1].to}:null;selected=null;targets=[];$("analysis").textContent="Finish the game to enable analysis.";render();};
-$("restart").onclick=()=>{if(running)return;game.reset();selected=null;targets=[];last=null;$("analysis").textContent="Finish the game to enable analysis.";render();};
+$("undo").onclick=()=>{
+ if(running||botThinking)return;
+ if(game.history().length)game.undo();
+ if(mode==="1p"&&game.history().length&&game.turn()!==humanColor)game.undo();
+ const h=game.history({verbose:true});last=h.length?{from:h[h.length-1].from,to:h[h.length-1].to}:null;
+ selected=null;targets=[];$("analysis").textContent="Finish the game to enable analysis.";render();
+};
+$("restart").onclick=()=>{
+ if(running||botThinking)return;
+ game.reset();selected=null;targets=[];last=null;$("analysis").textContent="Finish the game to enable analysis.";render();
+ if(mode==="1p"&&humanColor==="b")botMove();
+};
 $("flip").onclick=()=>{flipped=!flipped;render();};
+
+function updateModeControls(){
+ mode=$("mode").value;
+ humanColor=$("human-color").value;
+ botElo=Number($("elo").value);
+ $("bot-settings").style.display=mode==="1p"?"block":"none";
+ $("elo-value").textContent=String(botElo);
+ $("subtitle").textContent=mode==="1p"?"Play against Stockfish · choose your side and bot strength":"Two-player chess · legal moves · post-game engine analysis";
+}
+$("mode").addEventListener("change",()=>{
+ if(running||botThinking)return;
+ updateModeControls();game.reset();selected=null;targets=[];last=null;
+ $("analysis").textContent="Finish the game to enable analysis.";render();
+ if(mode==="1p"&&humanColor==="b")botMove();
+});
+$("human-color").addEventListener("change",()=>{
+ if(running||botThinking)return;
+ updateModeControls();game.reset();selected=null;targets=[];last=null;
+ $("analysis").textContent="Finish the game to enable analysis.";render();
+ if(mode==="1p"&&humanColor==="b")botMove();
+});
+$("elo").addEventListener("input",updateModeControls);
+$("elo").addEventListener("change",()=>{
+ botElo=Number($("elo").value);
+ if(mode==="1p"&&!running&&!botThinking&&game.history().length===0&&humanColor==="b")botMove();
+});
+
+
+function configureBotStrength(){
+ if(!worker||!engineReady)return;
+ if(botElo<1320){
+  const skill=Math.max(0,Math.min(19,Math.round(botElo/1320*19)));
+  worker.postMessage("setoption name UCI_LimitStrength value false");
+  worker.postMessage("setoption name Skill Level value "+skill);
+ }else{
+  worker.postMessage("setoption name Skill Level value 20");
+  worker.postMessage("setoption name UCI_LimitStrength value true");
+  worker.postMessage("setoption name UCI_Elo value "+Math.min(3000,botElo));
+ }
+}
+function botMove(){
+ if(mode!=="1p"||finished()||game.turn()===humanColor||botThinking||running)return;
+ if(!engineReady){$("status").textContent="Waiting for Stockfish to finish loading…";return;}
+ botThinking=true;selected=null;targets=[];render();
+ $("status").textContent="Stockfish is thinking…";
+ configureBotStrength();
+ search={kind:"bot",score:0};
+ worker.postMessage("position fen "+game.fen());
+ worker.postMessage("go movetime "+(botElo<800?500:botElo<1800?800:1200));
+}
+function finishBotMove(uci){
+ botThinking=false;
+ if(mode!=="1p"||finished()) {render();return;}
+ if(!uci||uci==="(none)"||uci==="0000"){render();return;}
+ const move={from:uci.slice(0,2),to:uci.slice(2,4)};
+ if(uci.length>4)move.promotion=uci[4];
+ const played=game.move(move);
+ if(played){
+  last={from:played.from,to:played.to};selected=null;targets=[];
+  $("analysis").textContent=finished()?"Game finished. You can now analyze it.":"Finish the game to enable analysis.";
+ }
+ render();
+}
 
 function initEngine(){
  try{
@@ -110,17 +209,22 @@ function initEngine(){
 }
 function engineMessage(line){
  if(line==="uciok"){worker.postMessage("isready");return;}
- if(line==="readyok"){engineReady=true;$("engine-status").textContent="Stockfish ready.";render();return;}
+ if(line==="readyok"){engineReady=true;$("engine-status").textContent="Stockfish ready.";render();if(mode==="1p"&&humanColor==="b"&&game.history().length===0)botMove();return;}
  if(!search)return;
  const m=line.match(/\bscore\s+(cp|mate)\s+(-?\d+)/);
  if(m){const v=Number(m[2]);search.score=m[1]==="cp"?v/100:(v>0?1000-v:-1000-v);}
- if(line.startsWith("bestmove")){const s=search;search=null;if(s.resolve)s.resolve(s.score);}
+ if(line.startsWith("bestmove")){
+  const s=search;search=null;
+  const best=line.trim().split(/\s+/)[1]||"";
+  if(s.kind==="bot")finishBotMove(best);
+  else if(s.resolve)s.resolve({score:s.score,bestmove:best});
+ }
 }
 function evaluate(fen,t){
  return new Promise((resolve,reject)=>{
   if(!engineReady)return reject(Error("Stockfish is not ready."));
   if(t!==token||stopFlag)return resolve(null);
-  search={resolve,score:0};worker.postMessage("position fen "+fen);worker.postMessage("go depth 12");
+  search={kind:"eval",resolve,score:0};worker.postMessage("position fen "+fen);worker.postMessage("go depth 12");
  });
 }
 async function analyze(){
@@ -134,9 +238,9 @@ async function analyze(){
   for(let i=0;i<positions.length;i++){
    if(t!==token||stopFlag)break;
    $("analysis").textContent=`Analyzing position ${i+1} of ${positions.length}…`;
-   const score=await evaluate(positions[i].fen,t);
-   if(score===null||t!==token||stopFlag)break;
-   evals.push(score*(i%2===0?1:-1)); // convert side-to-move score to White's perspective
+   const result=await evaluate(positions[i].fen,t);
+   if(result===null||t!==token||stopFlag)break;
+   evals.push(result.score*(i%2===0?1:-1)); // convert side-to-move score to White's perspective
   }
   if(t!==token||stopFlag){$("analysis").textContent="Analysis stopped.";return;}
   const rows=[];
@@ -158,6 +262,7 @@ function stop(){
  running=false;$("stop").disabled=true;$("analysis").textContent="Analysis stopped.";render();
 }
 $("analyze").onclick=analyze;$("stop").onclick=stop;
+updateModeControls();
 render();initEngine();
 })();
 </script>
