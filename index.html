@@ -1,1 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chess with Stockfish</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<style>
+:root{--bg:#171a21;--panel:#242a35;--muted:#aeb8c7;--light:#eeeed2;--dark:#769656}
+*{box-sizing:border-box}body{margin:0;padding:22px;background:var(--bg);color:#f1f3f7;font:15px system-ui,sans-serif}
+.app{max-width:1100px;margin:auto}h1{margin:0 0 5px}.sub,.hint{color:var(--muted)}
+.layout{display:grid;grid-template-columns:minmax(280px,680px) minmax(260px,1fr);gap:20px;align-items:start}
+.player,.panel{background:var(--panel);padding:12px 15px;border-radius:9px}.player{display:flex;justify-content:space-between;margin-bottom:9px}.player.bottom{margin:9px 0 0}
+.board{display:grid;grid-template-columns:repeat(8,1fr);width:100%;aspect-ratio:1;border:5px solid #343b49;border-radius:5px;overflow:hidden}
+.square{position:relative;display:flex;align-items:center;justify-content:center;aspect-ratio:1;cursor:pointer;user-select:none;font-family:"Segoe UI Symbol",serif;font-size:clamp(25px,6.3vw,64px);line-height:1}
+.light{background:var(--light);color:#171717}.dark{background:var(--dark);color:#171717}.selected{background:#f6f669!important}.last{box-shadow:inset 0 0 0 999px #f6f66977}.piece-white{color:white;text-shadow:0 1px 2px #222,1px 0 2px #222,0 -1px 2px #222,-1px 0 2px #222}.piece-black{color:#202020}
+.dot{position:absolute;width:24%;height:24%;border-radius:50%;background:#2225;pointer-events:none}.ring{position:absolute;inset:3px;border:5px solid #2225;border-radius:50%;pointer-events:none}
+.coord{position:absolute;left:4px;bottom:2px;font:10px system-ui;opacity:.7}
+.side{display:flex;flex-direction:column;gap:14px}.panel h2{font-size:17px;margin:0 0 10px}.status{color:var(--muted);min-height:24px}
+.buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}button{border:0;border-radius:7px;padding:9px 12px;background:#3b4659;color:white;font-weight:600;cursor:pointer}button.primary{background:#356fc2}button:disabled{opacity:.45;cursor:not-allowed}
+.moves{max-height:300px;overflow:auto;display:grid;grid-template-columns:36px 1fr 1fr;gap:3px 7px;font-variant-numeric:tabular-nums}.move-no{color:var(--muted);padding:4px}.analysis{white-space:pre-wrap;color:var(--muted);font-size:14px;overflow-wrap:anywhere}.hint{font-size:12px;margin-top:8px}
+.promotion{display:none;position:fixed;inset:0;background:#0009;z-index:5;align-items:center;justify-content:center}.promotion-box{background:var(--panel);padding:18px;border-radius:12px;display:flex;gap:10px}.promotion-box button{font-size:32px;min-width:58px}
+@media(max-width:800px){body{padding:12px}.layout{grid-template-columns:1fr}.square{font-size:clamp(27px,10vw,62px)}}
+</style>
+</head>
+<body>
+<div class="app">
+<header><h1>Chess with Stockfish</h1><div class="sub">Two-player chess · legal moves · post-game engine analysis</div></header>
+<div class="layout">
+<main>
+<div class="player"><span>Black</span><span></span></div>
+<div id="board" class="board" aria-label="Chess board"></div>
+<div class="player bottom"><span>White</span><span></span></div>
+</main>
+<aside class="side">
+<section class="panel"><h2>Game</h2><div id="status" class="status">White to move.</div><div class="buttons"><button id="undo">Undo move</button><button id="restart">New game</button><button id="flip">Flip board</button></div></section>
+<section class="panel"><h2>Move history</h2><div id="moves" class="moves">No moves yet.</div></section>
+<section class="panel"><h2>Stockfish analysis</h2><div id="engine-status" class="status">Loading Stockfish…</div><div class="buttons"><button id="analyze" class="primary" disabled>Analyze finished game</button><button id="stop" disabled>Stop</button></div><div id="analysis" class="analysis" style="margin-top:12px">Finish the game to enable analysis.</div><div class="hint">Analysis runs in your browser. Keep this page open while it works.</div></section>
+</aside>
+</div></div>
+<div id="promotion" class="promotion"><div class="promotion-box"><button data-p="q">♛</button><button data-p="r">♜</button><button data-p="b">♝</button><button data-p="n">♞</button></div></div>
+<script>
+(() => {
+"use strict";
+if(typeof Chess==="undefined"){document.getElementById("status").textContent="Could not load chess.js. Check your internet connection and reload.";return;}
+const game=new Chess(),$=id=>document.getElementById(id);
+const symbols={wp:"♙",wn:"♘",wb:"♗",wr:"♖",wq:"♕",wk:"♔",bp:"♟",bn:"♞",bb:"♝",br:"♜",bq:"♛",bk:"♚"};
+const files="abcdefgh";let flipped=false,selected=null,targets=[],last=null,promotion=null;
+let worker=null,engineReady=false,search=null,running=false,stopFlag=false,token=0;
+function finished(){return game.game_over();}
+function sqAt(row,col){return (flipped?files[7-col]:files[col])+(flipped?row+1:8-row);}
+function status(){
+ if(game.in_checkmate())return "Checkmate — "+(game.turn()==="w"?"Black":"White")+" wins.";
+ if(game.in_stalemate())return "Draw by stalemate.";
+ if(game.in_draw())return "Draw.";
+ if(game.in_check())return (game.turn()==="w"?"White":"Black")+" is in check.";
+ return (game.turn()==="w"?"White":"Black")+" to move.";
+}
+function render(){
+ const board=$("board");board.innerHTML="";const data=game.board();
+ for(let r=0;r<8;r++)for(let c=0;c<8;c++){
+  const sq=sqAt(r,c),rr=8-Number(sq[1]),cc=files.indexOf(sq[0]),piece=data[rr][cc];
+  const el=document.createElement("div");el.className="square "+((rr+cc)%2===0?"light":"dark");el.dataset.sq=sq;
+  if(sq===selected)el.classList.add("selected");if(last&&(last.from===sq||last.to===sq))el.classList.add("last");
+  if(piece){const span=document.createElement("span");span.textContent=symbols[piece.color+piece.type];span.className=piece.color==="w"?"piece-white":"piece-black";el.appendChild(span);}
+  if(targets.includes(sq)){const mark=document.createElement("span");mark.className=piece?"ring":"dot";el.appendChild(mark);}
+  if(c===0){const x=document.createElement("span");x.className="coord";x.textContent=sq[1];el.appendChild(x);}
+  if(r===7){const x=document.createElement("span");x.className="coord";x.style.left="auto";x.style.right="4px";x.textContent=sq[0];el.appendChild(x);}
+  el.addEventListener("click",()=>clickSquare(sq));board.appendChild(el);
+ }
+ $("status").textContent=status();renderMoves();
+ $("undo").disabled=!game.history().length||running;
+ $("analyze").disabled=!finished()||!engineReady||running;
+}
+function renderMoves(){
+ const hist=game.history(),el=$("moves");el.innerHTML="";
+ if(!hist.length){el.textContent="No moves yet.";return;}
+ for(let i=0;i<hist.length;i+=2){
+  const n=document.createElement("span"),w=document.createElement("span"),b=document.createElement("span");
+  n.className="move-no";n.textContent=(i/2+1)+".";w.textContent=hist[i];b.textContent=hist[i+1]||"";el.append(n,w,b);
+ }
+}
+function clickSquare(sq){
+ if(finished()||running||promotion)return;
+ const p=game.get(sq);
+ if(selected&&targets.includes(sq)){doMove(selected,sq);return;}
+ if(p&&p.color===game.turn()){selected=sq;targets=game.moves({square:sq,verbose:true}).map(m=>m.to);}
+ else{selected=null;targets=[];}render();
+}
+function doMove(from,to,prom){
+ const p=game.get(from),isProm=p&&p.type==="p"&&((p.color==="w"&&to[1]==="8")||(p.color==="b"&&to[1]==="1"));
+ if(isProm&&!prom){promotion={from,to};$("promotion").style.display="flex";return;}
+ const m=game.move({from,to,promotion:prom||"q"});
+ if(m){last={from:m.from,to:m.to};selected=null;targets=[];$("analysis").textContent=finished()?"Game finished. You can now analyze it.":"Finish the game to enable analysis.";render();}
+}
+$("promotion").querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>{
+ if(!promotion)return;const p=promotion;promotion=null;$("promotion").style.display="none";doMove(p.from,p.to,b.dataset.p);
+}));
+$("undo").onclick=()=>{if(running)return;game.undo();const h=game.history({verbose:true});last=h.length?{from:h[h.length-1].from,to:h[h.length-1].to}:null;selected=null;targets=[];$("analysis").textContent="Finish the game to enable analysis.";render();};
+$("restart").onclick=()=>{if(running)return;game.reset();selected=null;targets=[];last=null;$("analysis").textContent="Finish the game to enable analysis.";render();};
+$("flip").onclick=()=>{flipped=!flipped;render();};
 
+function initEngine(){
+ try{
+  worker=new Worker("stockfish-19-lite-single.js");
+  worker.onmessage=e=>engineMessage(String(e.data||""));
+  worker.onerror=()=>{$("engine-status").textContent="Stockfish failed to load. Check the JS and WASM filenames and deployment.";engineReady=false;render();};
+  worker.postMessage("uci");
+ }catch(e){$("engine-status").textContent="Could not start Stockfish: "+e.message;}
+}
+function engineMessage(line){
+ if(line==="uciok"){worker.postMessage("isready");return;}
+ if(line==="readyok"){engineReady=true;$("engine-status").textContent="Stockfish ready.";render();return;}
+ if(!search)return;
+ const m=line.match(/\bscore\s+(cp|mate)\s+(-?\d+)/);
+ if(m){const v=Number(m[2]);search.score=m[1]==="cp"?v/100:(v>0?1000-v:-1000-v);}
+ if(line.startsWith("bestmove")){const s=search;search=null;if(s.resolve)s.resolve(s.score);}
+}
+function evaluate(fen,t){
+ return new Promise((resolve,reject)=>{
+  if(!engineReady)return reject(Error("Stockfish is not ready."));
+  if(t!==token||stopFlag)return resolve(null);
+  search={resolve,score:0};worker.postMessage("position fen "+fen);worker.postMessage("go depth 12");
+ });
+}
+async function analyze(){
+ if(!engineReady||!finished()||running)return;
+ running=true;stopFlag=false;const t=++token;
+ $("analyze").disabled=true;$("stop").disabled=false;$("undo").disabled=true;
+ try{
+  const replay=new Chess(),positions=[{fen:replay.fen(),move:null}],hist=game.history({verbose:true});
+  for(const move of hist){replay.move(move);positions.push({fen:replay.fen(),move});}
+  const evals=[];
+  for(let i=0;i<positions.length;i++){
+   if(t!==token||stopFlag)break;
+   $("analysis").textContent=`Analyzing position ${i+1} of ${positions.length}…`;
+   const score=await evaluate(positions[i].fen,t);
+   if(score===null||t!==token||stopFlag)break;
+   evals.push(score*(i%2===0?1:-1)); // convert side-to-move score to White's perspective
+  }
+  if(t!==token||stopFlag){$("analysis").textContent="Analysis stopped.";return;}
+  const rows=[];
+  for(let i=1;i<positions.length;i++){
+   if(evals[i-1]===undefined||evals[i]===undefined)continue;
+   const white=i%2===1,loss=white?evals[i-1]-evals[i]:evals[i]-evals[i-1];
+   const label=loss>2?"Blunder":loss>1?"Mistake":loss>.5?"Inaccuracy":loss>.2?"Small inaccuracy":"Best / excellent";
+   const move=positions[i].move;
+   rows.push(`${Math.ceil(i/2)}${white?".":"..."} ${move.san} — ${label} (estimated loss: ${Math.max(0,loss).toFixed(2)})`);
+  }
+  const final=evals[evals.length-1],summary=final===undefined?"":`Final evaluation (White's perspective): ${final>=0?"+":""}${final.toFixed(2)}\n\n`;
+  $("analysis").textContent=summary+(rows.join("\n")||"No move evaluations returned.");
+ }catch(e){$("analysis").textContent="Analysis error: "+e.message;}
+ finally{if(t===token){running=false;$("stop").disabled=true;render();}}
+}
+function stop(){
+ if(!running)return;stopFlag=true;token++;if(worker)worker.postMessage("stop");
+ if(search){const s=search;search=null;if(s.resolve)s.resolve(null);}
+ running=false;$("stop").disabled=true;$("analysis").textContent="Analysis stopped.";render();
+}
+$("analyze").onclick=analyze;$("stop").onclick=stop;
+render();initEngine();
+})();
+</script>
+</body>
+</html>
