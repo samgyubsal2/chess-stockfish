@@ -46,7 +46,7 @@
 </select>
 <label for="elo">Bot ELO: <strong id="elo-value">1500</strong></label>
 <input id="elo" type="range" min="0" max="3000" step="1" value="1500" style="display:block;width:100%;margin:9px 0">
-<div class="hint">At exactly 0, the bot makes a random legal move. Other ratings use Stockfish's strength controls; exact ELO cannot be guaranteed.</div>
+<div class="hint">Below 50 ELO, Stockfish evaluates every legal move and deliberately plays its worst-scoring option. Other ratings use Stockfish's strength controls; exact ELO cannot be guaranteed.</div>
 </div>
 <div id="status" class="status" style="margin-top:10px">White to move.</div>
 <div class="buttons"><button id="undo">Undo move</button><button id="restart">New game</button><button id="flip">Flip board</button></div>
@@ -165,6 +165,7 @@ $("elo").addEventListener("change",()=>{
 
 function configureBotStrength(){
  if(!worker||!engineReady)return;
+ worker.postMessage("setoption name MultiPV value 1");
  if(botElo<1320){
   const skill=Math.max(0,Math.min(19,Math.round(botElo/1320*19)));
   worker.postMessage("setoption name UCI_LimitStrength value false");
@@ -177,30 +178,25 @@ function configureBotStrength(){
 }
 function botMove(){
  if(mode!=="1p"||finished()||game.turn()===humanColor||botThinking||running)return;
+ if(!engineReady){$("status").textContent="Waiting for Stockfish to finish loading…";return;}
  botThinking=true;selected=null;targets=[];render();
 
- // At exactly 0 ELO, deliberately ignore Stockfish and choose a random
- // legal move. This creates genuinely unreliable play rather than merely
- // using Stockfish's weakest built-in skill setting.
- if(botElo===0){
-  $("status").textContent="0 ELO bot is choosing a completely random move…";
+ if(botElo<50){
   const legal=game.moves({verbose:true});
   if(!legal.length){botThinking=false;render();return;}
-  const chosen=legal[Math.floor(Math.random()*legal.length)];
-  window.setTimeout(()=>{
-   if(mode!=="1p"||finished()||game.turn()===humanColor){botThinking=false;render();return;}
-   const played=game.move({from:chosen.from,to:chosen.to,promotion:chosen.promotion||"q"});
-   botThinking=false;
-   if(played){
-    last={from:played.from,to:played.to};selected=null;targets=[];
-    $("analysis").textContent=finished()?"Game finished. You can now analyze it.":"Finish the game to enable analysis.";
-   }
-   render();
-  },350);
+  $("status").textContent="Very weak bot: Stockfish is searching for its worst move…";
+
+  // Ask Stockfish to score every legal root move. MultiPV lists the
+  // candidate moves with evaluations; the bot will play the lowest score.
+  worker.postMessage("setoption name UCI_LimitStrength value false");
+  worker.postMessage("setoption name Skill Level value 20");
+  worker.postMessage("setoption name MultiPV value "+legal.length);
+  search={kind:"worstbot",lines:{},legalCount:legal.length};
+  worker.postMessage("position fen "+game.fen());
+  worker.postMessage("go depth 5");
   return;
  }
 
- if(!engineReady){botThinking=false;$("status").textContent="Waiting for Stockfish to finish loading…";render();return;}
  $("status").textContent="Stockfish is thinking…";
  configureBotStrength();
  search={kind:"bot",score:0};
@@ -233,14 +229,37 @@ function engineMessage(line){
  if(line==="uciok"){worker.postMessage("isready");return;}
  if(line==="readyok"){engineReady=true;$("engine-status").textContent="Stockfish ready.";render();if(mode==="1p"&&humanColor==="b"&&game.history().length===0)botMove();return;}
  if(!search)return;
- const m=line.match(/\bscore\s+(cp|mate)\s+(-?\d+)/);
- if(m){const v=Number(m[2]);search.score=m[1]==="cp"?v/100:(v>0?1000-v:-1000-v);}
+
+ if(search.kind==="worstbot"&&line.startsWith("info ")){
+  const mp=line.match(/\bmultipv\s+(\d+)/);
+  const dep=line.match(/\bdepth\s+(\d+)/);
+  const sc=line.match(/\bscore\s+(cp|mate)\s+(-?\d+)/);
+  const pv=line.match(/\bpv\s+([a-h][1-8][a-h][1-8][qrbn]?)/);
+  if(mp&&dep&&sc&&pv){
+   const n=Number(mp[1]),depth=Number(dep[1]),v=Number(sc[2]);
+   const score=sc[1]==="cp"?v:(v>0?100000-v:-100000-v);
+   const previous=search.lines[n];
+   if(!previous||depth>=previous.depth)search.lines[n]={depth,score,move:pv[1]};
+  }
+ }
+
  if(line.startsWith("bestmove")){
   const s=search;search=null;
   const best=line.trim().split(/\s+/)[1]||"";
   if(s.kind==="bot")finishBotMove(best);
+  else if(s.kind==="worstbot"){
+   const candidates=Object.values(s.lines);
+   candidates.sort((a,b)=>a.score-b.score);
+   const deliberatelyBad=candidates.length?candidates[0].move:best;
+   worker.postMessage("setoption name MultiPV value 1");
+   finishBotMove(deliberatelyBad);
+  }
   else if(s.resolve)s.resolve({score:s.score,bestmove:best});
+  return;
  }
+
+ const m=line.match(/\bscore\s+(cp|mate)\s+(-?\d+)/);
+ if(m){const v=Number(m[2]);search.score=m[1]==="cp"?v/100:(v>0?1000-v:-1000-v);}
 }
 function evaluate(fen,t){
  return new Promise((resolve,reject)=>{
